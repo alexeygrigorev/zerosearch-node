@@ -1,0 +1,48 @@
+{
+  "name": "zerosearch-node",
+  "version": "0.4.0",
+  "description": "A tiny, zero-dependency BM25-lite in-memory text search index. TypeScript/Node port of the Python zerosearch library, with a cross-language-compatible index format.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "FORMAT.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "search",
+    "bm25",
+    "tf-idf",
+    "information-retrieval",
+    "minsearch",
+    "zerosearch",
+    "zero-dependency"
+  ],
+  "author": "Alexey Grigorev <alexey.s.grigoriev@gmail.com>",
+  "license": "WTFPL",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexeygrigorev/zerosearch-node"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
