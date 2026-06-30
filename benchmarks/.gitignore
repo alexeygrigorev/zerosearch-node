@@ -1,0 +1,4 @@
+# Generated query workloads (regenerate with gen_queries.py). The small,
+# committed sample stays; large dumps do not.
+data/queries_10000_100k.json
+results/

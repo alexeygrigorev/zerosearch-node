@@ -23,6 +23,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
+    "bench": "node --import tsx --expose-gc benchmarks/simplewiki_benchmark.ts",
     "clean": "rm -rf dist"
   },
   "keywords": [
