@@ -11,21 +11,27 @@ actually contain a query term. The runtime has **no third-party dependencies**.
 ## Cross-language compatibility
 
 This is the headline feature: `zerosearch-node` and Python `zerosearch` rank
-identically (same tokenizer, same BM25-lite math, same tie-breaks), and they
-share a **portable, language-neutral JSON index format** (`json-1`, documented
-in [`FORMAT.md`](./FORMAT.md)). An index serialized in that format can be built
-in one language and searched in the other.
+identically (same tokenizer, same BM25-lite math, same tie-breaks), and Node
+reads a Python index **two ways**:
 
-The cross-language guarantee is enforced by a parity test: the fixture in
-`tests/fixtures/parity.json` is produced by the **Python** library
-(`scripts/gen_fixture.py`), and the Node test suite asserts that loading that
-Python-built index — and re-fitting the same corpus — reproduces Python's
-top-k results (ids and scores within `1e-9`) for 120 query/filter/boost cases.
+1. **Native Python `.save()` files, directly** — `Index.load` reads the raw
+   Python `marshal` artifact that `zerosearch.save()` writes. No change to the
+   published Python library is needed. (See `src/marshal.ts` and the marshal
+   section of [`FORMAT.md`](./FORMAT.md).)
+2. **A portable, language-neutral JSON format** (`json-1`) for a text artifact
+   that does not carry Python's interpreter/platform pinning.
 
-> Note: the upstream Python library currently serializes with `marshal`
-> (Python-only), so it does not yet read/write `json-1` directly. `FORMAT.md`
-> and `scripts/gen_fixture.py` specify exactly what a matching Python-side
-> reader/writer needs to do.
+`Index.load` auto-detects which of the two a file is.
+
+The guarantee is enforced by parity tests against fixtures produced by the
+**Python** library (`scripts/gen_fixture.py`): the Node suite loads the native
+`marshal` artifact (`tests/fixtures/py-native.zsx`), the `json-1` index, and a
+freshly re-fit corpus, and asserts all three reproduce Python's top-k results
+(ids exact, scores within `1e-9`) across 120 query/filter/boost cases.
+
+> Direction of travel: Node currently *reads* Python `marshal` but does not
+> *write* it. To hand an index from Node back to Python, ship `json-1` (and add
+> a `json-1` reader on the Python side). See [`FORMAT.md`](./FORMAT.md).
 
 ## Install
 
@@ -94,7 +100,17 @@ const results = index.search("docker compose");
 ```
 
 `dumps()` / `loads()` are the in-memory equivalents (return/accept a JSON
-string). The artifact is portable `json-1` JSON — see [`FORMAT.md`](./FORMAT.md).
+string). `save()` writes the portable `json-1` JSON; `load()` reads either
+`json-1` **or a native Python `zerosearch.save()` `marshal` file** (auto-detected
+— see [`FORMAT.md`](./FORMAT.md)):
+
+```ts
+// load an index built and saved by the Python zerosearch library, unchanged:
+const index = Index.load("index.zsx");        // native Python marshal
+const same = Index.load("index.zsj");          // portable json-1
+const fromBytes = Index.loadBytes(buffer);     // same detection, from memory
+```
+
 If you built with a **custom tokenizer**, resupply it on load:
 `Index.load("index.zsj", { tokenizer: myTokenizer })`.
 

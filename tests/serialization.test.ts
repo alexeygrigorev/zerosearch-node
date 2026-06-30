@@ -275,6 +275,20 @@ describe("cross-language parity with Python zerosearch", () => {
     }
   });
 
+  it("loads a NATIVE Python zerosearch.save() artifact and matches every case", () => {
+    // py-native.zsx is the raw marshal blob written by the Python library.
+    const loaded = Index.load(join(here, "fixtures", "py-native.zsx"));
+    for (const c of fixture.cases) {
+      matches(loaded.search(c.query, c.filter, c.boost, 10), c.expected);
+    }
+  });
+
+  it("native marshal load preserves nested document values", () => {
+    const loaded = Index.load(join(here, "fixtures", "py-native.zsx"));
+    assert.deepEqual((loaded.docs[0] as { meta: unknown }).meta, { n: 0 });
+    assert.equal(loaded.docs.length, fixture.docs.length);
+  });
+
   it("sanity: stop words in the Python index match the Node default", () => {
     assert.deepEqual((fixture.index as { stop_words: string[] }).stop_words, [...DEFAULT_STOP_WORDS].sort());
   });

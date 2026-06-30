@@ -134,9 +134,16 @@ def main() -> None:
         "index": to_portable_json(index),
     }
 
-    out = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "parity.json"
+    fixtures_dir = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+    out = fixtures_dir / "parity.json"
     out.write_text(json.dumps(fixture, ensure_ascii=False))
     print(f"wrote {out} ({out.stat().st_size} bytes, {len(cases)} cases)")
+
+    # The real, native artifact: exactly what `zerosearch.save()` writes
+    # (Python `marshal` bytes). The Node parity test loads this directly.
+    native = fixtures_dir / "py-native.zsx"
+    index.save(native)
+    print(f"wrote {native} ({native.stat().st_size} bytes, native marshal)")
 
 
 if __name__ == "__main__":

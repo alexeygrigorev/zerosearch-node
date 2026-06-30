@@ -75,12 +75,46 @@ query-term frequency, and `boost[f]` defaults to `1.0`. Results are ranked by
 "BM25-lite" means here: BM25's IDF combined with a Lucene-style
 `tf / sqrt(field_length)` normalization.
 
+## Reading native Python `marshal` artifacts directly
+
+`zerosearch-node` **also reads a native Python `zerosearch.save()` file
+directly** — no change to the published Python library required. `Index.load`
+auto-detects the format: a UTF-8 `json-1` document, or a binary Python `marshal`
+blob (both happen to start with `{`, so detection peeks at the next byte —
+`"` for JSON, a marshal type byte otherwise).
+
+The marshal reader (`src/marshal.ts`) is intentionally minimal: it implements
+only the opcodes `zerosearch`'s `dumps()` emits — dict, list, tuple
+(incl. small-tuple), int (and int64/long), binary float, the str variants
+(ascii / short-ascii / unicode, plus their interned forms), bytes, bool, None,
+and the `FLAG_REF` / `TYPE_REF` back-reference mechanism. Any other opcode
+throws. The posting byte blobs (`array.tobytes()`) are decoded with the item
+sizes recorded in the artifact's `itemsizes` field.
+
+### Assumptions and validation (marshal path)
+
+The Python loader pins an artifact to a specific interpreter and platform. The
+Node reader makes the matching assumptions and validates them up front, failing
+clearly on mismatch (acceptable because the index is rebuilt at deploy time on
+Linux x86-64):
+
+- `magic` must be `"zerosearch"` and `format` must be `2` (the Python
+  `_FORMAT_VERSION`).
+- `itemsizes` must be `[4, 4, 4, 1, 4]` — the `(I, I, I, B, I)` typecodes the
+  Python library uses. A different platform's array sizes are rejected.
+- Byte blobs are decoded **little-endian**. `array.tobytes()` uses native byte
+  order, so a big-endian-built artifact is not supported (caught in practice by
+  the `itemsizes` check and the rebuild-on-deploy policy).
+- marshal integers and framing are always little-endian (CPython writes them
+  that way regardless of platform), so no extra assumption is needed there.
+
 ## Interop status
 
-- `zerosearch-node` reads and writes `json-1` natively.
-- The Python `zerosearch` library does **not** yet read or write `json-1`; it
-  still uses `marshal`. A matching reader/writer needs to be added there for a
-  Python-built index to load in Node directly (and vice versa). The repository's
-  `scripts/gen_fixture.py` shows the exact, read-only mapping from the Python
-  index's internal arrays to `json-1` — it is the reference for that future
-  Python-side implementation.
+- `zerosearch-node` reads and writes `json-1` natively, **and** reads native
+  Python `marshal` `.save()` artifacts directly (read path) — so a Python-built
+  index loads in Node with no Python-side change.
+- The Python `zerosearch` library still only reads/writes its own `marshal`
+  format. For Node to *hand an index back to Python*, ship `json-1` and add a
+  `json-1` reader on the Python side (Node currently only *reads* marshal, it
+  does not write it). `scripts/gen_fixture.py` documents the read-only mapping
+  between the Python index's internal arrays and `json-1`.
