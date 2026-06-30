@@ -11,12 +11,15 @@
  * document frequencies are computed over the filtered candidate set. A term that
  * appears more than once in the query is weighted by its query-term frequency.
  *
- * Cross-language compatibility: `save`/`load` use a portable, language-neutral
- * JSON format (see FORMAT.md) so an index produced here can be consumed by a
- * matching reader in the Python library and vice versa.
+ * Cross-language compatibility: `load` reads a native Python `zerosearch.save()`
+ * artifact directly (Python `marshal` format), and `save`/`load` also support a
+ * portable, language-neutral JSON format (`json-1`, see FORMAT.md). `load`
+ * auto-detects which format a file is in.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+
+import { readMarshal, type MarshalValue } from "./marshal.js";
 
 export const VERSION = "0.4.0";
 
@@ -438,18 +441,8 @@ export class Index {
     writeFileSync(path, this.dumps());
   }
 
-  /** Reconstruct an index from a portable JSON state object. */
-  static fromJSON(state: PortableIndex, options: LoadOptions = {}): Index {
-    if (state == null || state.magic !== MAGIC) {
-      throw new Error("not a zerosearch index");
-    }
-    if (state.format !== JSON_FORMAT) {
-      throw new Error(
-        `unsupported zerosearch index format ${JSON.stringify(state.format)} ` +
-          `(this build expects ${JSON.stringify(JSON_FORMAT)})`,
-      );
-    }
-
+  /** Build an Index from already-decoded packed state (no format checks). */
+  private static reconstruct(state: PortableIndex, options: LoadOptions): Index {
     const index = new Index(state.text_fields, state.keyword_fields, {
       stopWords: state.stop_words,
       tokenizer: options.tokenizer,
@@ -477,14 +470,46 @@ export class Index {
     return index;
   }
 
-  /** Reconstruct an index from `dumps()` JSON string. */
+  /** Reconstruct an index from a portable `json-1` state object. */
+  static fromJSON(state: PortableIndex, options: LoadOptions = {}): Index {
+    if (state == null || state.magic !== MAGIC) {
+      throw new Error("not a zerosearch index");
+    }
+    if (state.format !== JSON_FORMAT) {
+      throw new Error(
+        `unsupported zerosearch index format ${JSON.stringify(state.format)} ` +
+          `(this build expects ${JSON.stringify(JSON_FORMAT)})`,
+      );
+    }
+    return Index.reconstruct(state, options);
+  }
+
+  /** Reconstruct an index from `dumps()` JSON string (the `json-1` format). */
   static loads(data: string, options: LoadOptions = {}): Index {
     return Index.fromJSON(JSON.parse(data) as PortableIndex, options);
   }
 
-  /** Load a packed index previously written with `save()`. */
+  /**
+   * Reconstruct an index from a native Python `zerosearch.save()` artifact
+   * (Python `marshal` bytes). Assumes a little-endian build with the array
+   * item sizes the Python library records (validated below).
+   */
+  static loadsMarshal(bytes: Uint8Array, options: LoadOptions = {}): Index {
+    const state = readMarshal(bytes);
+    return Index.reconstruct(marshalToPortable(state), options);
+  }
+
+  /** Load an index file, auto-detecting `json-1` JSON vs native marshal. */
   static load(path: string, options: LoadOptions = {}): Index {
-    return Index.loads(readFileSync(path, "utf8"), options);
+    return Index.loadBytes(readFileSync(path), options);
+  }
+
+  /** Load from raw bytes, auto-detecting `json-1` JSON vs native marshal. */
+  static loadBytes(bytes: Uint8Array, options: LoadOptions = {}): Index {
+    if (looksLikeJson(bytes)) {
+      return Index.loads(Buffer.from(bytes).toString("utf8"), options);
+    }
+    return Index.loadsMarshal(bytes, options);
   }
 }
 
@@ -494,4 +519,116 @@ function comparePostings(
   b: [number, number, number],
 ): number {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
+// -- native Python marshal interop ----------------------------------------
+
+/** The Python `_FORMAT_VERSION` of artifacts we can read natively. */
+const MARSHAL_FORMAT_VERSION = 2;
+/**
+ * Expected array item sizes, in the order the Python library records them:
+ * (_OFFSET_TC, _DOC_TC, _TF_TC, _FIELD_TC, _LENGTH_TC) = (I, I, I, B, I).
+ * We only support this little-endian, 32-bit layout (our index is rebuilt at
+ * deploy on Linux), so a different platform's artifact fails clearly.
+ */
+const EXPECTED_ITEMSIZES = [4, 4, 4, 1, 4];
+
+/** Does this buffer look like our UTF-8 `json-1` text (vs binary marshal)? */
+function looksLikeJson(bytes: Uint8Array): boolean {
+  let i = 0;
+  while (i < bytes.length && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0a || bytes[i] === 0x0d)) {
+    i++;
+  }
+  if (bytes[i] !== 0x7b) return false; // both JSON and marshal start with '{'
+  // In json-1 the next non-space byte is a quote (the "magic" key). A marshal
+  // dict instead has a type byte (e.g. 0xda for a short interned+ref string).
+  let j = i + 1;
+  while (j < bytes.length && (bytes[j] === 0x20 || bytes[j] === 0x09 || bytes[j] === 0x0a || bytes[j] === 0x0d)) {
+    j++;
+  }
+  return bytes[j] === 0x22; // '"'
+}
+
+/** Decode a little-endian byte blob of `itemSize`-byte unsigned ints. */
+function decodeUintArray(blob: MarshalValue, itemSize: number): number[] {
+  if (!(blob instanceof Uint8Array)) {
+    throw new Error("marshal: expected bytes for a packed posting array");
+  }
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const count = Math.floor(blob.byteLength / itemSize);
+  const out = new Array<number>(count);
+  for (let i = 0; i < count; i++) {
+    const offset = i * itemSize;
+    out[i] =
+      itemSize === 1
+        ? view.getUint8(offset)
+        : itemSize === 2
+          ? view.getUint16(offset, true)
+          : view.getUint32(offset, true);
+  }
+  return out;
+}
+
+function asStringArray(value: MarshalValue, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`marshal: ${label} is not a list`);
+  return value.map((v) => String(v));
+}
+
+/** Map a decoded Python marshal index dict into the portable `json-1` shape. */
+function marshalToPortable(state: MarshalValue): PortableIndex {
+  if (state === null || typeof state !== "object" || Array.isArray(state) || state instanceof Uint8Array) {
+    throw new Error("not a zerosearch index");
+  }
+  const dict = state as Record<string, MarshalValue>;
+  if (dict.magic !== MAGIC) throw new Error("not a zerosearch index");
+  if (dict.format !== MARSHAL_FORMAT_VERSION) {
+    throw new Error(
+      `unsupported zerosearch marshal format ${JSON.stringify(dict.format)} ` +
+        `(this build expects ${MARSHAL_FORMAT_VERSION})`,
+    );
+  }
+
+  const itemsizes = Array.isArray(dict.itemsizes) ? dict.itemsizes.map(Number) : [];
+  if (
+    itemsizes.length !== EXPECTED_ITEMSIZES.length ||
+    itemsizes.some((size, i) => size !== EXPECTED_ITEMSIZES[i])
+  ) {
+    throw new Error(
+      `zerosearch marshal index was built on an incompatible platform ` +
+        `(item sizes ${JSON.stringify(itemsizes)}, expected ${JSON.stringify(EXPECTED_ITEMSIZES)})`,
+    );
+  }
+  const [offsetSize, docSize, tfSize, fieldSize, lengthSize] = itemsizes;
+
+  const keywordIndexRaw =
+    dict.keyword_index && typeof dict.keyword_index === "object" && !Array.isArray(dict.keyword_index)
+      ? (dict.keyword_index as Record<string, MarshalValue>)
+      : {};
+  const keyword_index: Record<string, Record<string, number[]>> = {};
+  for (const [field, values] of Object.entries(keywordIndexRaw)) {
+    const inner: Record<string, number[]> = {};
+    const valuesDict = values as Record<string, MarshalValue>;
+    for (const [value, blob] of Object.entries(valuesDict)) {
+      inner[value] = decodeUintArray(blob, docSize);
+    }
+    keyword_index[field] = inner;
+  }
+
+  return {
+    magic: MAGIC,
+    format: JSON_FORMAT,
+    text_fields: asStringArray(dict.text_fields, "text_fields"),
+    keyword_fields: asStringArray(dict.keyword_fields, "keyword_fields"),
+    stop_words: asStringArray(dict.stop_words, "stop_words"),
+    n_fields: Number(dict.n_fields),
+    docs: Array.isArray(dict.docs) ? (dict.docs as Doc[]) : [],
+    vocab: asStringArray(dict.vocab, "vocab"),
+    post_off: decodeUintArray(dict.post_off, offsetSize),
+    post_doc: decodeUintArray(dict.post_doc, docSize),
+    post_field: decodeUintArray(dict.post_field, fieldSize),
+    post_tf: decodeUintArray(dict.post_tf, tfSize),
+    doc_freq: decodeUintArray(dict.doc_freq, docSize),
+    lengths: decodeUintArray(dict.lengths, lengthSize),
+    keyword_index,
+  };
 }
