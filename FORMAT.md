@@ -31,6 +31,7 @@ A single JSON object (UTF-8). All fields are required.
 | `text_fields`   | `string[]`                            | ranked fields, in field order |
 | `keyword_fields`| `string[]`                            | exact-match filter fields |
 | `stop_words`    | `string[]` (sorted)                   | stop words used at build time |
+| `stemmer`       | `string \| null` (optional)           | built-in stemmer name ('porter'), or `null`/absent for none |
 | `n_fields`      | `number`                              | `text_fields.length` |
 | `docs`          | `object[]`                            | the original documents, in doc-id order (doc id = array index) |
 | `vocab`         | `string[]` (sorted)                   | term `i` has term-id `i` |
@@ -57,6 +58,23 @@ by `(doc_id, field_index, tf)` so that tied scores fall back to document order.
 - `keyword_index[field][value]` lists are sorted ascending.
 - Field values are string-coerced before indexing/filtering (the equivalent of
   Python `str(value)` / JS `String(value)`), and a missing field is `""`.
+
+### Stemming (optional)
+
+If the index was built with a built-in stemmer, its **name** is stored in the
+`stemmer` field (e.g. `"porter"`) and restored on load, so a loaded index stems
+its queries automatically to match the stored stems. Only a built-in name is
+persisted: an index built with a *function* stemmer records `stemmer: null`
+(the function cannot be serialized by name), so that tokenization must be
+re-supplied via a custom `tokenizer` on load. `stemmer` is optional and
+backward-compatible: pre-stemmer artifacts omit it and are read as "no stemmer".
+The `stemmer` field is added within the existing `json-1` (and Python
+`marshal` format `2`) layout — no version bump — mirroring the Python
+`zerosearch` change, which likewise left `_FORMAT_VERSION` at `2`.
+
+TypeScript currently implements only `porter` faithfully (a byte-for-byte port
+of Python `stemlite.porter`); `snowball`/`lancaster` names fall back to a no-op
+in Node, so do not persist those names for an index a Node client will query.
 
 ## Scoring reproduced from this state
 

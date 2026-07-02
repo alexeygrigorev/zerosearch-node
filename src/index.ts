@@ -20,6 +20,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 import { readMarshal, type MarshalValue } from "./marshal.js";
+import { getStemmer, type StemmerFn } from "./stemmers.js";
+
+export { getStemmer, porterStemmer, STEMMERS, type StemmerFn } from "./stemmers.js";
 
 export const VERSION = "0.4.0";
 
@@ -41,6 +44,20 @@ export type Doc = Record<string, unknown>;
 export type SearchResult = Doc & { score: number };
 export type Tokenizer = (text: string) => string[];
 
+/**
+ * A stemmer option: either a `str -> str` callable, or a built-in name
+ * ('porter'; 'none'/unknown = no-op). Mirrors the Python `zerosearch` stemmer
+ * parameter. Only a built-in NAME can be persisted in a saved index.
+ */
+export type StemmerOption = StemmerFn | string;
+
+/** Resolve a stemmer option to a function (or `null`). Mirrors `_resolve_stemmer`. */
+function resolveStemmer(stemmer: StemmerOption | null | undefined): StemmerFn | null {
+  if (stemmer == null) return null;
+  if (typeof stemmer === "function") return stemmer;
+  return getStemmer(stemmer);
+}
+
 /** A `filter_dict` value: scalar = exact match, array = IN (any of). */
 export type FilterValue = unknown | unknown[];
 
@@ -50,17 +67,24 @@ export type FilterValue = unknown | unknown[];
  * The token pattern keeps `+ . # _ -` inside a token so technical terms such as
  * `c++`, `node.js` and `f-string` survive intact (a token must start with a
  * letter or digit, so a leading `.` in `.env` is dropped).
+ *
+ * `stemmer` is an optional `str -> str` callable applied to each surviving
+ * token (the stop-word and length checks run on the raw token first, matching
+ * the Python order), so `startup` and `startups` collapse to one term.
  */
 export function tokenize(
   text: string,
   stopWords: Iterable<string> = DEFAULT_STOP_WORDS,
+  stemmer: StemmerFn | null = null,
 ): string[] {
   const stops = stopWords instanceof Set ? stopWords : new Set(stopWords);
   const out: string[] = [];
   // matchAll requires the global flag (TOKEN_RE has it) and is non-mutating.
   for (const match of text.matchAll(TOKEN_RE)) {
     const token = match[0].toLowerCase();
-    if (token.length > 1 && !stops.has(token)) out.push(token);
+    if (token.length > 1 && !stops.has(token)) {
+      out.push(stemmer === null ? token : stemmer(token));
+    }
   }
   return out;
 }
@@ -89,6 +113,8 @@ export interface PortableIndex {
   text_fields: string[];
   keyword_fields: string[];
   stop_words: string[];
+  /** Built-in stemmer name, or `null`. Absent in pre-stemmer artifacts. */
+  stemmer?: string | null;
   n_fields: number;
   docs: Doc[];
   vocab: string[];
@@ -114,6 +140,8 @@ export class Index {
   readonly keywordFields: string[];
   private readonly stopWords: ReadonlySet<string>;
   private readonly tokenizeFn: Tokenizer;
+  /** Built-in stemmer name, persisted and restored on load (null if none/custom fn). */
+  private readonly stemmerName: string | null;
 
   docs: Doc[] = [];
 
@@ -132,13 +160,29 @@ export class Index {
   constructor(
     textFields: string[],
     keywordFields: string[] | null = null,
-    options: { stopWords?: Iterable<string>; tokenizer?: Tokenizer } = {},
+    options: {
+      stopWords?: Iterable<string>;
+      tokenizer?: Tokenizer;
+      /**
+       * Optional stemmer applied to each token by the default tokenizer: a
+       * `str -> str` callable, or a built-in name ('porter'). Ignored when a
+       * custom `tokenizer` is supplied. A built-in NAME is persisted in the
+       * saved artifact and restored automatically on `load`; a function cannot
+       * be persisted by name.
+       */
+      stemmer?: StemmerOption | null;
+    } = {},
   ) {
     this.textFields = [...textFields];
     this.keywordFields = [...(keywordFields ?? [])];
     this.stopWords = new Set(options.stopWords ?? DEFAULT_STOP_WORDS);
+    // Persist the stemmer name only when it is a built-in string, so load() can
+    // restore it without the caller re-passing it.
+    this.stemmerName = typeof options.stemmer === "string" ? options.stemmer : null;
+    const stemmerFn = resolveStemmer(options.stemmer);
     this.tokenizeFn =
-      options.tokenizer ?? ((text: string) => tokenize(text, this.stopWords));
+      options.tokenizer ??
+      ((text: string) => tokenize(text, this.stopWords, stemmerFn));
     this.nFields = this.textFields.length;
   }
 
@@ -418,6 +462,7 @@ export class Index {
       text_fields: this.textFields,
       keyword_fields: this.keywordFields,
       stop_words: [...this.stopWords].sort(),
+      stemmer: this.stemmerName,
       n_fields: this.nFields,
       docs: this.docs,
       vocab: this.vocab,
@@ -443,9 +488,13 @@ export class Index {
 
   /** Build an Index from already-decoded packed state (no format checks). */
   private static reconstruct(state: PortableIndex, options: LoadOptions): Index {
+    // Restore a built-in stemmer by name unless a custom tokenizer overrides the
+    // whole tokenization path. `null`/absent means no stemming.
+    const stemmer = options.tokenizer != null ? null : state.stemmer ?? null;
     const index = new Index(state.text_fields, state.keyword_fields, {
       stopWords: state.stop_words,
       tokenizer: options.tokenizer,
+      stemmer,
     });
     index.docs = state.docs;
     index.nFields = state.n_fields;
@@ -620,6 +669,7 @@ function marshalToPortable(state: MarshalValue): PortableIndex {
     text_fields: asStringArray(dict.text_fields, "text_fields"),
     keyword_fields: asStringArray(dict.keyword_fields, "keyword_fields"),
     stop_words: asStringArray(dict.stop_words, "stop_words"),
+    stemmer: typeof dict.stemmer === "string" ? dict.stemmer : null,
     n_fields: Number(dict.n_fields),
     docs: Array.isArray(dict.docs) ? (dict.docs as Doc[]) : [],
     vocab: asStringArray(dict.vocab, "vocab"),
