@@ -24,7 +24,7 @@ import { getStemmer, type StemmerFn } from "./stemmers.js";
 
 export { getStemmer, porterStemmer, STEMMERS, type StemmerFn } from "./stemmers.js";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 
 /**
  * Token pattern. A token starts with a letter or digit and may then contain
